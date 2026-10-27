@@ -4,50 +4,48 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-This is a **CloudFormation template repository** that provides reusable nested stack templates for deploying S3 buckets with security best practices. Templates follow the nested stack pattern and are designed to be referenced by parent CloudFormation stacks.
+This is a **CloudFormation template repository** that provides a reusable nested stack template for deploying a Kinesis Data Stream with configurable capacity mode, retention and KMS encryption. The template follows the nested stack pattern and is designed to be referenced by parent CloudFormation stacks.
 
 **Key characteristics:**
 
-- Nested CloudFormation templates (referenced via `TemplateURL`)
-- Parameterized bucket naming with account ID, environment, and region
-- S3 security defaults: versioning enabled, public access blocked
-- Optional S3 bucket policy enforcement (encryption, secure transport)
+- Nested CloudFormation template (referenced via `TemplateURL`)
+- Stream name built from project, base name, account ID, environment and region
+- ON_DEMAND or PROVISIONED capacity mode, configurable retention (24 to 8760 hours)
+- Optional KMS encryption; an empty `KmsKeyId` disables it
+- Explicit `DeletionPolicy` and `UpdateReplacePolicy` on the stream
 - Automated semantic versioning and releases
 - AWS OIDC authentication for CI/CD deployments
 
 ## Project Structure
 
 ```text
-templates/
-├── s3-bucket.yaml                # Nested template: S3 bucket creation
-└── s3-bucket-policy.yaml         # Nested template: S3 bucket policy
-
-parameters/
-├── dev.json                       # Parameters for development environment
-├── staging.json                   # Parameters for staging environment
-├── prod.json                      # Parameters for production environment
-├── policy-dev.json                # Bucket policy parameters (development)
-├── policy-staging.json            # Bucket policy parameters (staging)
-└── policy-prod.json               # Bucket policy parameters (production)
+cloudformation/
+├── template.yaml                    # Nested template: Kinesis Data Stream
+├── parameters.json                  # Parameter values used for deployment
+└── stack-config.json                # Stack name, template and parameter file paths (read by CI)
 
 .github/workflows/
-├── ci.yaml                        # Validates, deploys, and cleans up templates
-├── release.yaml                   # Semantic release on push to main
-└── create-branch.yaml             # Auto-create feature branches from issues
+├── ci.yaml                          # CI build (calls a reusable workflow)
+├── release.yaml                     # Semantic release on push to main
+├── create-branch.yaml               # Auto-create feature branches from issues
+├── claude.yaml                      # Claude Code workflow
+├── claude-code-review.yaml          # Claude Code review workflow
+├── notify.yaml                      # Notifications
+└── setup-environments.yaml          # GitHub environment setup
 
 scripts/plugins/
-├── release.config.js              # Semantic-release configuration
-└── (other release plugins)        # Custom commit analysis, notes generation
+├── release.config.js                # Semantic-release configuration
+└── (other release plugins)          # Commit analysis, notes generation, publishing
 
 .claude/
-├── settings.json                  # Claude Code workspace settings
-└── settings.local.json            # Local overrides
+└── .skills/                         # Project skills
 
 .devcontainer/
-└── devcontainer.json              # Dev container setup (Node.js 20)
+└── devcontainer.json                # Dev container setup (Node.js 20)
 
-package.json                       # Dependencies: semantic-release, commitizen
-README.md                          # Template documentation and usage examples
+package.json                         # Dependencies: semantic-release, commitizen
+README.md                            # Template documentation and usage examples
+CHANGELOG.md                         # Generated release changelog
 ```
 
 ## Development Commands
@@ -76,94 +74,75 @@ Select `feat`, `fix`, or `chore` type. Only `feat` and `fix` trigger releases.
 
 ### Nested Stack Pattern
 
-This repo provides **nested stack templates** — templates that are referenced from parent/root CloudFormation stacks via `TemplateURL`. The templates are self-contained and export outputs for cross-stack references.
+This repo provides a **nested stack template**, referenced from parent/root CloudFormation stacks via `TemplateURL`.
 
-- **Parent stack** calls: `AWS::CloudFormation::Stack` with `TemplateURL` pointing to S3
-- **Nested templates** output values via `Outputs` section with `Export`
-- Parent retrieves outputs via `!GetAtt NestedStack.Outputs.OutputKey`
+- **Parent stack** calls `AWS::CloudFormation::Stack` with `TemplateURL` pointing to the uploaded template in S3
+- **Nested template** returns values through its `Outputs` section (no `Export`, so values are passed explicitly)
+- **Parent** reads outputs with `!GetAtt NestedStack.Outputs.OutputKey`
 
-### Bucket Naming Convention
-
-Bucket names follow a deterministic pattern driven by parameters:
+### Stream Naming Convention
 
 ```bash
-{ProjectName}-{BucketBaseName}-{AccountId}-{Environment}-{Region}[-{CiSuffix}]
+{ProjectName}-{StreamBaseName}-{AccountId}-{Environment}-{Region}[-{CiSuffix}]
 ```
 
-Example: `myproject-cfn-bucket-123456789012-devl-us-east-1`
+Example: `cfn-nested-cfn-stream-123456789012-devl-us-east-1`
 
-This ensures:
+### Parameter Groups
 
-- Uniqueness across AWS accounts and regions
-- Environment isolation
-- Consistent naming for infrastructure automation
+Parameters are grouped in the `AWS::CloudFormation::Interface` metadata of `template.yaml`:
 
-### Parameter-Driven Configuration
+- **Naming:** `ProjectName`, `StreamBaseName`, `environment`, `CiSuffix`
+- **Capacity:** `StreamMode`, `ShardCount`, `RetentionPeriodHours`
+- **Encryption:** `KmsKeyId`
 
-Both templates accept parameters to support:
+When adding a parameter, add it to a group and to `ParameterLabels`.
 
-- **Standalone mode**: Direct bucket name provided
-- **Integrated mode**: Bucket name constructed from project/environment parameters
+### KMS Key Handling
 
-The `s3-bucket-policy.yaml` template checks if `BucketName` is provided; if not, it constructs the name using the same parameters as the bucket template.
+- `KmsKeyId` accepts a key ID, key ARN, alias name (`alias/...`) or alias ARN, or an empty string
+- `AllowedPattern` enforces these forms; bare alias names without the `alias/` prefix are rejected
+- Encryption is enabled when `KmsKeyId` is non-empty (`IsEncrypted` condition)
+- The value is passed unchanged to `StreamEncryption.KeyId`
+
+### Resource Policies
+
+- The stream has `DeletionPolicy: Delete` and `UpdateReplacePolicy: Delete`, so it suits ephemeral CI stacks
+- For long-lived production streams, switch both to `Retain`; deleting the stack then leaves the stream in place
+- Resource-level metadata (`com.aws.cloudformation.Context` with `why` and `must`) describes the intent of each stateful resource
 
 ## Key Files to Understand
 
-### `templates/s3-bucket.yaml`
+### `cloudformation/template.yaml`
 
-**Purpose:** Creates an S3 bucket with security defaults
+**Purpose:** Creates a Kinesis Data Stream with configurable capacity, retention and encryption
 
 **Key inputs:**
 
-- `ProjectName` (required): Project prefix
-- `BucketBaseName` (default: `cfn-bucket`): Base name component
-- `environment`: Environment label (devl, stag, prod)
+- `ProjectName` (required): Stream name prefix, lowercase letters, numbers and hyphens, max 20 characters
+- `StreamBaseName` (default: `cfn-nested-stream`): Base name component
+- `environment`: Environment label (`devl`, `prod`, `test`)
 - `CiSuffix`: Optional suffix for CI/CD unique deployments
+- `StreamMode`: `ON_DEMAND` (default) or `PROVISIONED`
+- `ShardCount`: Used only when `StreamMode` is `PROVISIONED`
+- `RetentionPeriodHours`: 24 to 8760
+- `KmsKeyId` (default: `alias/aws/kinesis`): KMS key ID, ARN or alias; empty disables encryption
 
 **Key outputs:**
 
-- `S3BucketName`: Bucket name (exported for parent stack)
-- `S3BucketArn`: Bucket ARN
-
-**Features:**
-
-- Versioning enabled by default
-- Public access blocking enabled (all 4 options)
-- Conditional naming: different bucket name with/without CI suffix
-
-### `templates/s3-bucket-policy.yaml`
-
-**Purpose:** Applies an optional S3 bucket policy for encryption and transport security
-
-**Key inputs:** Same as bucket template, plus `BucketName` (standalone mode)
-
-**Behavior:**
-
-- If `BucketName` provided (non-empty), use it directly
-- Otherwise, construct name from ProjectName/BucketBaseName/environment/CiSuffix
-- Enforces S3 encryption on PutObject
-- Enforces HTTPS-only transport
+- `KinesisStreamName`: Stream name
+- `KinesisStreamArn`: Stream ARN
 
 ### `.github/workflows/ci.yaml`
 
-**Triggered on:**
+**Triggered on:** Manual `workflow_dispatch`. The `push` and `pull_request` triggers are currently commented out.
 
-- Manual workflow_dispatch (anytime)
-- Pull requests (any branch)
-- Pushes to `feature/**` and `bug/**` branches
-
-**Path filter:** Only runs if changes to `templates/`, `parameters/`, or `.github/workflows/ci.yaml`
-
-**Phases:**
-
-1. **Validation:** `aws cloudformation validate-template` on both templates
-2. **Deployment:** Creates CloudFormation stacks in CI environment
-3. **Cleanup:** Destroys stacks (policy stack first, then bucket) for ephemeral testing
+**Configuration:** The `load-config` job reads `cloudformation/stack-config.json` for the stack name and template and parameter file paths. The build itself runs in the reusable workflow `subhamay-bhattacharyya-gha/cfn-ci-build-reusable-wf`, which owns the validation, deployment and cleanup steps.
 
 **Environment setup:**
 
 - Reads config from GitHub environment variables: `AWS_REGION`, `AWS_ACCOUNT_ID`, `OIDC_ROLE_NAME`, `CFN_TEMPLATES_S3_BUCKET`
-- Uses AWS OIDC for keyless authentication via `aws-actions/configure-aws-credentials`
+- Uses AWS OIDC for keyless authentication
 - Requires GitHub environment `ci` with OIDC trust configured
 
 ### `.github/workflows/release.yaml`
@@ -187,32 +166,28 @@ The `s3-bucket-policy.yaml` template checks if `BucketName` is provided; if not,
 
 ## Testing & Validation
 
-**Manual template validation:**
+**Lint the template** (the same check the IDE runs, including informational rules):
 
 ```bash
-aws cloudformation validate-template --template-body file://templates/s3-bucket.yaml
-aws cloudformation validate-template --template-body file://templates/s3-bucket-policy.yaml
+cfn-lint cloudformation/template.yaml
+cfn-lint --include-checks=I cloudformation/template.yaml
+```
+
+**Validate with AWS:**
+
+```bash
+aws cloudformation validate-template --template-body file://cloudformation/template.yaml
 ```
 
 **Manual stack deployment:**
 
 ```bash
-# Deploy bucket to dev environment
 aws cloudformation deploy \
-  --template-file templates/s3-bucket.yaml \
-  --stack-name my-stack-dev \
-  --parameter-overrides file://parameters/dev.json \
-  --region us-east-1
-
-# Deploy policy after bucket is created
-aws cloudformation deploy \
-  --template-file templates/s3-bucket-policy.yaml \
-  --stack-name my-policy-dev \
-  --parameter-overrides file://parameters/policy-dev.json \
+  --template-file cloudformation/template.yaml \
+  --stack-name cfn-nested-kinesis-devl \
+  --parameter-overrides file://cloudformation/parameters.json \
   --region us-east-1
 ```
-
-The CI workflow (ci.yaml) runs this full cycle automatically on PR, then cleans up.
 
 ## AWS Credentials & Environment Variables
 
@@ -242,14 +217,15 @@ Commit types:
 
 Only commits to `main` trigger releases. Feature branches use this format but releases happen on merge to main.
 
-## When Modifying Templates
+## When Modifying the Template
 
-1. **Edit the template YAML** in `templates/`
-2. **Update parameter files** in `parameters/` if new parameters added
-3. **Test locally** with `aws cloudformation validate-template`
-4. **Create a PR** with conventional commit message (e.g., `feat: add encryption key parameter`)
-5. **CI validates and deploys** to dev environment automatically
-6. **Merge to main** → release workflow creates version tag and GitHub release
+1. **Edit `cloudformation/template.yaml`**
+2. **Update `cloudformation/parameters.json`** if parameters are added, renamed or removed. A stale key makes deployment fail.
+3. **Update the parameter groups and labels** in the interface metadata when adding a parameter
+4. **Lint and validate** with `cfn-lint` and `aws cloudformation validate-template`
+5. **Update `README.md`** if parameters, outputs or behavior change
+6. **Create a PR** with conventional commit message (e.g., `feat: add shard count parameter`)
+7. **Merge to main** → release workflow creates version tag and GitHub release
 
 ## Dev Container
 
@@ -263,4 +239,3 @@ Use via VS Code: `code --remote-container-url <repo-url>`
 ## Current Branch
 
 Main branch is the release branch. Feature work branches from here and merges back via PR. Branch naming follows: `{type}/CFN-{issue-number}-{slug}` (e.g., `feature/CFN-42-add-encryption`).
-

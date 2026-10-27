@@ -28,7 +28,7 @@ These fields **MUST** be present and correct:
 
 ```json
 {
-  "name": "github-action-template"
+  "name": "cfn-nested-aws-kinesis-data-stream"
 }
 ```
 

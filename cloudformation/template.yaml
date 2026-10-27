@@ -1,0 +1,145 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: 'Nested CloudFormation template to create a Kinesis Data Stream with configurable capacity mode, retention and encryption'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Naming"
+        Parameters:
+          - ProjectName
+          - StreamBaseName
+          - environment
+          - CiSuffix
+      - Label:
+          default: "Capacity"
+        Parameters:
+          - StreamMode
+          - ShardCount
+          - RetentionPeriodHours
+      - Label:
+          default: "Encryption"
+        Parameters:
+          - KmsKeyId
+    ParameterLabels:
+      ProjectName:
+        default: "Project name"
+      StreamBaseName:
+        default: "Stream base name"
+      environment:
+        default: "Environment"
+      CiSuffix:
+        default: "CI suffix"
+      StreamMode:
+        default: "Capacity mode"
+      ShardCount:
+        default: "Shard count"
+      RetentionPeriodHours:
+        default: "Retention period (hours)"
+      KmsKeyId:
+        default: "KMS key ID"
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cfn-nested
+    Description: "Project name to use as a stream name prefix"
+    MinLength: 1
+    MaxLength: 20
+    AllowedPattern: "^[a-z0-9-]+$"
+    ConstraintDescription: "Project name must be lowercase letters, numbers, and hyphens only"
+
+  StreamBaseName:
+    Type: String
+    Default: kinesis-data-stream
+    MinLength: 1
+    MaxLength: 40
+    AllowedPattern: "^[a-zA-Z0-9_.-]+$"
+    ConstraintDescription: "Stream base name may contain letters, numbers, underscores, periods and hyphens only"
+    Description: Base name for the Kinesis stream (account ID, environment, and region will be appended)
+
+  environment:
+    Type: String
+    Default: devl
+    AllowedValues: 
+      - devl
+      - prod
+      - test
+    Description: "Deployment environment for the Kinesis stream"
+
+  CiSuffix:
+    Type: String
+    Default: ""
+    Description: "Optional CI suffix to append to the stream name"
+
+  StreamMode:
+    Type: String
+    Default: ON_DEMAND
+    AllowedValues:
+      - ON_DEMAND
+      - PROVISIONED
+    Description: "Capacity mode of the stream. ON_DEMAND scales automatically; PROVISIONED uses ShardCount"
+
+  ShardCount:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    Description: "Number of shards. Only used when StreamMode is PROVISIONED"
+
+  RetentionPeriodHours:
+    Type: Number
+    Default: 24
+    MinValue: 24
+    MaxValue: 8760
+    Description: "How long (in hours) records are retained in the stream"
+
+  KmsKeyId:
+    Type: String
+    Default: "alias/SB-KMS"
+    AllowedPattern: "^(|alias/[a-zA-Z0-9/_-]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|mrk-[0-9a-f]{32}|arn:aws[a-zA-Z-]*:kms:[a-z0-9-]+:[0-9]{12}:(key|alias)/.+)$"
+    ConstraintDescription: "Must be a KMS key ID, key ARN, alias name (alias/...) or alias ARN, or empty to disable encryption"
+    Description: "KMS key ID, ARN or alias used for encryption. Leave empty to disable encryption"
+
+Conditions:
+  HasCiSuffix: !Not [!Equals [!Ref CiSuffix, ""]]
+  IsProvisioned: !Equals [!Ref StreamMode, PROVISIONED]
+  IsEncrypted: !Not [!Equals [!Ref KmsKeyId, ""]]
+
+Resources:
+  KinesisStream:
+    Type: AWS::Kinesis::Stream
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "Provides a reusable Kinesis Data Stream for nested stack deployments with configurable capacity mode, retention period and KMS encryption"
+        must:
+          - "Must support both ON_DEMAND and PROVISIONED capacity modes"
+          - "Must support optional KMS encryption for sensitive data protection"
+    Properties:
+      Name: !If
+        - HasCiSuffix
+        - !Sub '${ProjectName}-${StreamBaseName}-${AWS::AccountId}-${environment}-${AWS::Region}-${CiSuffix}'
+        - !Sub '${ProjectName}-${StreamBaseName}-${AWS::AccountId}-${environment}-${AWS::Region}'
+      RetentionPeriodHours: !Ref RetentionPeriodHours
+      StreamModeDetails:
+        StreamMode: !Ref StreamMode
+      ShardCount: !If
+        - IsProvisioned
+        - !Ref ShardCount
+        - !Ref AWS::NoValue
+      StreamEncryption: !If
+        - IsEncrypted
+        - EncryptionType: KMS
+          KeyId: !Ref KmsKeyId
+        - !Ref AWS::NoValue
+
+Outputs:
+  KinesisStreamName:
+    Description: "Name of the Kinesis Data Stream"
+    Value: !Ref KinesisStream
+
+  KinesisStreamArn:
+    Description: "ARN of the Kinesis Data Stream"
+    Value: !GetAtt KinesisStream.Arn

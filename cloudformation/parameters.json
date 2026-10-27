@@ -1,0 +1,10 @@
+{
+  "ProjectName": "cfn-nested",
+  "environment": "devl",
+  "CiSuffix": "",
+  "StreamBaseName": "kinesis-data-stream",
+  "StreamMode": "ON_DEMAND",
+  "ShardCount": 1,
+  "RetentionPeriodHours": 24,
+  "KmsKeyId": "alias/SB-KMS"
+}
